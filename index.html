@@ -1,0 +1,1640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Hotel Run</title>
+<style>
+  html, body {
+    margin: 0; padding: 0;
+    background: #0f0c08;
+    color: #e8d8c0;
+    font-family: 'Courier New', monospace;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    user-select: none;
+  }
+  h1 {
+    color: #d4a373;
+    margin: 16px 0 4px;
+    font-size: 22px;
+    letter-spacing: 4px;
+  }
+  canvas {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    border: 2px solid #3a2e22;
+    background: #000;
+  }
+  #help {
+    margin: 10px 0 20px;
+    font-size: 12px;
+    opacity: 0.7;
+    text-align: center;
+    line-height: 1.6;
+    max-width: 720px;
+  }
+  kbd {
+    background: #3a2e22;
+    border: 1px solid #5a4e42;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-family: inherit;
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+  <h1>HOTEL RUN</h1>
+  <canvas id="game" width="960" height="600"></canvas>
+  <div id="help">
+    <kbd>← →</kbd> walk &nbsp;·&nbsp;
+    <kbd>↑ ↓</kbd> stairs / lift &nbsp;·&nbsp;
+    <kbd>SPACE</kbd> squeeze past pensioners &nbsp;·&nbsp;
+    <kbd>R</kbd> restart<br>
+    Your card is dead. Reach the <span style="color:#f4d03f">AUTOMAT</span> on floor 1 before the timer runs out.
+  </div>
+<script>
+'use strict';
+
+// ====================================================================
+//  Hotel Run — a Czech B-tier hotel side-scroller
+// ====================================================================
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 480, H = 300;
+const SCALE = canvas.width / W;
+ctx.imageSmoothingEnabled = false;
+ctx.scale(SCALE, SCALE);
+
+// ---- Layout constants ----
+const NUM_FLOORS = 4;
+const FLOOR_Y = [280, 220, 160, 100];   // walking-line y for floors 1..4
+const FLOOR_HEIGHT = 60;
+const HEADER_H = 30;
+
+const LIFT_X1 = 220, LIFT_X2 = 260;
+const LIFT_W = LIFT_X2 - LIFT_X1;
+const LIFT_CX = (LIFT_X1 + LIFT_X2) / 2;
+
+const STAIR_GAP = 10;          // distance from lift to stair-bottom
+const STAIR_RUN = 56;          // horizontal length of one stair flight
+const STAIR_DIAG = Math.hypot(STAIR_RUN, FLOOR_HEIGHT);
+
+const PLAYER_SPEED = 80;
+const STAIR_SPEED = 60;
+const LIFT_SPEED = 100;
+const LIFT_CALL_SPEED = 22;     // glacial — the lift "takes ages" when summoned
+const PEN_SPEED_MIN = 10;
+const PEN_SPEED_MAX = 22;
+
+const SQUEEZE_TIME = 0.7;
+const SQUEEZE_RANGE = 12;
+const COLLIDE_RANGE = 7;
+const ENTRY_TOLERANCE = 8;
+
+const TIME_LIMIT = 20;
+const ANGRY_PENALTY = 3;
+const NUM_PENSIONERS = 18;        // wandering background population
+const LIFT_CLUSTER_PER_FLOOR = 2; // pensioners parked right next to each lift door
+const SPORT_RATIO = 0.4;          // fraction of pensioners in tracksuits + caps
+
+// ---- Phrase pools ----
+const PHRASES_HAPPY = ['Hej!', 'Förlåt!', 'Tack!', 'Trevligt!', 'Oj då!', 'Ursäkta!', 'Hejsan!'];
+const PHRASES_ANGRY = ['Hörrudu!', 'Vad nu?!', 'Otroligt!', 'Skäms!', 'Nej då!', 'Usch!'];
+const PHRASES_IDLE  = ['Vackert...', 'Mmm.', 'Jaha...', 'Nämen...', 'Det var det.', 'Jaså?'];
+
+// ---- Palette: faded Habsburg grandeur ----
+const COL = {
+  wallDark:   '#2a1010',  // shadowed burgundy
+  wall:       '#5a1f20',  // wine red wall
+  wallLight:  '#7a2a2a',  // lighter wall (where light catches)
+  wallTrim:   '#180808',
+  damask:     '#7d3a3a',  // ornate pattern color on wallpaper
+  damaskDim:  '#3a1414',
+  gold:       '#c8a458',  // primary gilding
+  goldBright: '#f4d878',  // highlight gold
+  goldDark:   '#7a5e30',  // tarnished / shadowed gold
+  cream:      '#e8d8b0',  // pale ceiling / plaster
+  creamDim:   '#a8987c',
+  carpet:     '#5a1818',  // deep crimson runner
+  carpetMid:  '#7a2424',
+  carpetGold: '#a07838',  // gold pattern on carpet
+  liftShaft:  '#0e0606',
+  liftFrame:  '#a8843c',  // gilded brass
+  liftFrameH: '#e8c068',
+  liftCab:    '#3a1818',
+  liftCabIn:  '#5a2828',
+  stair:      '#3a1c0c',
+  stairTread: '#8a5230',  // worn marble-ish
+  stairRail:  '#d4a868',
+  text:       '#f0e0c8',
+  textDim:    '#a89478',
+  textShadow: '#1a120c',
+  highlight:  '#f4d03f',
+  warn:       '#e07050',
+  ok:         '#7ab85b',
+  bubbleBg:   '#f0e0c8',
+  bubbleEdge: '#1a120c',
+  stain:      '#2a1010',  // water/mold stain on walls
+  paint:      '#3c2010',  // old painting interior
+};
+
+// ---- Stair geometry helpers ----
+function leftStair(lower) {
+  return {
+    bx: LIFT_X1 - STAIR_GAP,
+    by: FLOOR_Y[lower],
+    tx: LIFT_X1 - STAIR_GAP - STAIR_RUN,
+    ty: FLOOR_Y[lower + 1],
+    side: 'left',
+    lower,
+  };
+}
+function rightStair(lower) {
+  return {
+    bx: LIFT_X2 + STAIR_GAP,
+    by: FLOOR_Y[lower],
+    tx: LIFT_X2 + STAIR_GAP + STAIR_RUN,
+    ty: FLOOR_Y[lower + 1],
+    side: 'right',
+    lower,
+  };
+}
+function stairOf(side, lower) {
+  return side === 'left' ? leftStair(lower) : rightStair(lower);
+}
+
+// ====================================================================
+//  Game state
+// ====================================================================
+
+const keys = {};
+const justPressed = {};
+window.addEventListener('keydown', e => {
+  if (!keys[e.key]) justPressed[e.key] = true;
+  keys[e.key] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+let game;
+
+function newGame() {
+  // Randomise player start: top floor, either far-left or far-right, facing inward
+  const playerFloor = NUM_FLOORS - 1;
+  const startLeft = Math.random() < 0.5;
+  const playerStartX = startLeft ? 30 : W - 30;
+  const playerFacing = startLeft ? 1 : -1;
+
+  // Lift starts on a random floor that is NOT the player's — guarantees a wait
+  let liftFloor;
+  do { liftFloor = Math.floor(Math.random() * NUM_FLOORS); }
+  while (liftFloor === playerFloor);
+
+  game = {
+    state: 'play',          // 'play' | 'won' | 'lost'
+    timer: TIME_LIMIT,
+    elapsed: 0,
+    encounters: 0,
+    happyCount: 0,
+    angryCount: 0,
+    player: {
+      mode: 'corridor',     // 'corridor' | 'stair' | 'lift' | 'squeeze'
+      floor: playerFloor,
+      x: playerStartX,
+      facing: playerFacing,
+      walkPhase: 0,
+      // stair state
+      stairSide: 'left',
+      stairLower: 0,
+      stairProgress: 0,
+      stairDir: 1,
+      // lift state
+      liftY: FLOOR_Y[playerFloor],
+      // squeeze state
+      squeezeT: 0,
+      squeezeTarget: null,
+    },
+    lift: {
+      currentFloor: liftFloor,
+      y: FLOOR_Y[liftFloor],
+      called: false,
+      calledFloor: null,
+      callBlinkT: 0,
+    },
+    pensioners: [],
+    bubbles: [],
+    automatPulse: 0,
+    shakeT: 0,
+    shakeMag: 0,
+  };
+  spawnPensioners();
+}
+
+function makePensionerBase(i) {
+  const formalCoats = ['#3a2c20', '#2c2018', '#4a3a30', '#5a4438', '#1f1812', '#3a2820'];
+  const sportCoats  = ['#2a4a8a', '#5a2a2a', '#2a6a4a', '#4a3a8a', '#6a5a2a', '#2a3a4a', '#7a3a3a'];
+  const hairs       = ['#e0e0e0', '#cccccc', '#d8d4cc', '#b8b0a8', '#e8e0d4'];
+  const capColors   = ['#1a1a4a', '#5a2a2a', '#2a4a2a', '#4a3a2a', '#3a3a3a', '#aa2222'];
+  const isSport = Math.random() < SPORT_RATIO;
+  return {
+    style: isSport ? 'sport' : 'formal',
+    coatColor: isSport
+      ? sportCoats[Math.floor(Math.random() * sportCoats.length)]
+      : formalCoats[Math.floor(Math.random() * formalCoats.length)],
+    capColor: capColors[Math.floor(Math.random() * capColors.length)],
+    hairColor: hairs[Math.floor(Math.random() * hairs.length)],
+    female: Math.random() < 0.5,
+    hasGlasses: Math.random() < 0.7,
+    speed: PEN_SPEED_MIN + Math.random() * (PEN_SPEED_MAX - PEN_SPEED_MIN),
+    idleTimer: 0.5 + Math.random() * 3,
+    speakTimer: 4 + Math.random() * 8,
+    bobPhase: Math.random() * Math.PI * 2,
+    legPhase: Math.random() * Math.PI * 2,
+  };
+}
+
+function spawnPensioners() {
+  let idx = 0;
+
+  // ---- Lift cluster: 2 stationary pensioners on each floor right next to the lift ----
+  // They block the approach to the lift and require squeezing.
+  for (let f = 0; f < NUM_FLOORS; f++) {
+    for (let s = 0; s < LIFT_CLUSTER_PER_FLOOR; s++) {
+      // alternate sides + add a bit of horizontal jitter
+      const side = s % 2 === 0 ? -1 : 1;
+      const baseX = side < 0 ? LIFT_X1 - 6 : LIFT_X2 + 6;
+      const jitter = -2 + Math.random() * 6; // 0..6 outward from lift
+      const x = baseX + side * jitter;
+
+      // Don't crowd the player's starting tile
+      if (f === game.player.floor && Math.abs(x - game.player.x) < 80) continue;
+
+      game.pensioners.push({
+        ...makePensionerBase(idx++),
+        mode: 'corridor',
+        floor: f,
+        x,
+        dir: side, // facing the lift
+        stationary: true,
+        liftWaiter: true,
+      });
+    }
+  }
+
+  // ---- Wandering background pensioners ----
+  for (let i = 0; i < NUM_PENSIONERS; i++) {
+    const onStair = Math.random() < 0.30;
+    const base = makePensionerBase(idx++);
+
+    if (onStair) {
+      const lower = Math.floor(Math.random() * (NUM_FLOORS - 1));
+      const side = Math.random() < 0.5 ? 'left' : 'right';
+      game.pensioners.push({
+        ...base,
+        mode: 'stair',
+        stairLower: lower,
+        stairSide: side,
+        stairProgress: 0.1 + Math.random() * 0.8,
+        stairDir: Math.random() < 0.5 ? 1 : -1,
+      });
+    } else {
+      const floor = Math.floor(Math.random() * NUM_FLOORS);
+      let x, attempts = 0;
+      do {
+        x = 25 + Math.random() * (W - 50);
+        attempts++;
+      } while (
+        attempts < 12 &&
+        ((x > LIFT_X1 - 16 && x < LIFT_X2 + 16) || // not on top of lift cluster
+         (floor === game.player.floor && Math.abs(x - game.player.x) < 50) || // not on top of player start
+         (floor === 0 && x > W - 70))              // not on top of automat
+      );
+      game.pensioners.push({
+        ...base,
+        mode: 'corridor',
+        floor,
+        x,
+        dir: Math.random() < 0.5 ? 1 : -1,
+        stationary: Math.random() < 0.20,
+      });
+    }
+  }
+}
+
+// ====================================================================
+//  Update
+// ====================================================================
+
+function update(dt) {
+  // Restart
+  if (justPressed['r'] || justPressed['R']) {
+    newGame();
+  }
+
+  if (game.state !== 'play') return;
+
+  game.timer -= dt;
+  game.elapsed += dt;
+  game.automatPulse += dt;
+  if (game.shakeT > 0) game.shakeT -= dt;
+
+  if (game.timer <= 0) {
+    game.timer = 0;
+    game.state = 'lost';
+    return;
+  }
+
+  updatePlayer(dt);
+  updatePensioners(dt);
+  updateBubbles(dt);
+  updateLift(dt);
+
+  // Win check — reach automat on floor 1
+  const p = game.player;
+  if (p.mode === 'corridor' && p.floor === 0 && p.x > W - 30) {
+    game.state = 'won';
+  }
+}
+
+function updatePlayer(dt) {
+  const p = game.player;
+
+  // ---- SQUEEZE ----
+  if (p.mode === 'squeeze') {
+    p.squeezeT -= dt;
+    if (p.squeezeT <= 0) {
+      const angry = Math.random() < 0.30;
+      const phrase = (angry ? PHRASES_ANGRY : PHRASES_HAPPY)[
+        Math.floor(Math.random() * (angry ? PHRASES_ANGRY.length : PHRASES_HAPPY.length))
+      ];
+      const t = p.squeezeTarget;
+      if (t) {
+        addBubble(t.x, FLOOR_Y[t.floor] - 20, phrase, angry ? COL.warn : COL.ok);
+      }
+      if (angry) {
+        game.timer = Math.max(0, game.timer - ANGRY_PENALTY);
+        game.angryCount++;
+        screenShake(0.25, 1.6);
+      } else {
+        game.happyCount++;
+      }
+      game.encounters++;
+      // Pop player past pensioner
+      if (t) {
+        const dir = Math.sign(t.x - p.x) || p.facing;
+        p.x = t.x + dir * (COLLIDE_RANGE + 2);
+        p.x = Math.max(8, Math.min(W - 8, p.x));
+        // Make pensioner pause briefly
+        t.idleTimer = 0.6 + Math.random() * 0.6;
+      }
+      p.mode = 'corridor';
+      p.squeezeTarget = null;
+    }
+    return;
+  }
+
+  // ---- CORRIDOR ----
+  if (p.mode === 'corridor') {
+    let vx = 0;
+    if (keys['ArrowLeft']  || keys['a'] || keys['A']) vx -= 1;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) vx += 1;
+    if (vx) p.facing = vx;
+
+    let nx = p.x + vx * PLAYER_SPEED * dt;
+    nx = Math.max(8, Math.min(W - 8, nx));
+
+    // Lift shaft is solid in corridor (must use up/down to enter)
+    if (vx > 0 && p.x < LIFT_X1 && nx > LIFT_X1 - 2) nx = LIFT_X1 - 2;
+    if (vx < 0 && p.x > LIFT_X2 && nx < LIFT_X2 + 2) nx = LIFT_X2 + 2;
+
+    // Pensioner collision (corridor only) — find nearest blocker in path
+    let blocker = null;
+    for (const pen of game.pensioners) {
+      if (pen.mode !== 'corridor' || pen.floor !== p.floor) continue;
+      const dx = pen.x - p.x;
+      if (Math.sign(dx) !== vx) continue;
+      if (Math.abs(pen.x - nx) < COLLIDE_RANGE) {
+        if (!blocker || Math.abs(pen.x - p.x) < Math.abs(blocker.x - p.x)) blocker = pen;
+      }
+    }
+
+    if (blocker) {
+      // stop just short
+      const stopX = blocker.x - vx * COLLIDE_RANGE;
+      if ((vx > 0 && stopX > p.x) || (vx < 0 && stopX < p.x)) p.x = stopX;
+    } else {
+      p.x = nx;
+    }
+    if (vx) p.walkPhase += dt * 10;
+
+    // Squeeze
+    if (keys[' ']) {
+      // find any adjacent pensioner
+      let target = null;
+      for (const pen of game.pensioners) {
+        if (pen.mode !== 'corridor' || pen.floor !== p.floor) continue;
+        if (Math.abs(pen.x - p.x) < SQUEEZE_RANGE) { target = pen; break; }
+      }
+      if (target) {
+        p.mode = 'squeeze';
+        p.squeezeT = SQUEEZE_TIME;
+        p.squeezeTarget = target;
+        return;
+      }
+    }
+
+    // Stair / lift entry
+    if (justPressed['ArrowUp']) {
+      // up-stair from current floor to floor+1
+      if (p.floor < NUM_FLOORS - 1) {
+        const lb = LIFT_X1 - STAIR_GAP;
+        const rb = LIFT_X2 + STAIR_GAP;
+        if (Math.abs(p.x - lb) < ENTRY_TOLERANCE) {
+          enterStair(p, 'left',  p.floor, 0, 1); return;
+        }
+        if (Math.abs(p.x - rb) < ENTRY_TOLERANCE) {
+          enterStair(p, 'right', p.floor, 0, 1); return;
+        }
+      }
+      // lift entry going up — must be at lift's current floor and not in transit
+      if (atLift(p)) {
+        if (!game.lift.called && game.lift.currentFloor === p.floor && p.floor < NUM_FLOORS - 1) {
+          enterLift(p);
+          return;
+        }
+        if (game.lift.called || game.lift.currentFloor !== p.floor) {
+          callLift(p.floor);
+          return;
+        }
+      }
+    }
+    if (justPressed['ArrowDown']) {
+      if (p.floor > 0) {
+        const ltX = LIFT_X1 - STAIR_GAP - STAIR_RUN;
+        const rtX = LIFT_X2 + STAIR_GAP + STAIR_RUN;
+        if (Math.abs(p.x - ltX) < ENTRY_TOLERANCE) {
+          enterStair(p, 'left',  p.floor - 1, 1, -1); return;
+        }
+        if (Math.abs(p.x - rtX) < ENTRY_TOLERANCE) {
+          enterStair(p, 'right', p.floor - 1, 1, -1); return;
+        }
+      }
+      if (atLift(p)) {
+        if (!game.lift.called && game.lift.currentFloor === p.floor && p.floor > 0) {
+          enterLift(p);
+          return;
+        }
+        if (game.lift.called || game.lift.currentFloor !== p.floor) {
+          callLift(p.floor);
+          return;
+        }
+      }
+    }
+    return;
+  }
+
+  // ---- STAIR ----
+  if (p.mode === 'stair') {
+    let vp = 0;
+    if (keys['ArrowUp']    || keys['w'] || keys['W']) vp += 1;
+    if (keys['ArrowDown']  || keys['s'] || keys['S']) vp -= 1;
+    // Allow left/right to also climb — direction depends on stair geometry
+    if (keys['ArrowLeft']  || keys['a'] || keys['A']) {
+      vp += (p.stairSide === 'left') ? 1 : -1;
+    }
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) {
+      vp += (p.stairSide === 'left') ? -1 : 1;
+    }
+    vp = Math.max(-1, Math.min(1, vp));
+
+    if (vp !== 0) {
+      p.stairProgress += vp * (STAIR_SPEED * dt) / STAIR_DIAG;
+      p.walkPhase += dt * 8;
+      p.facing = (p.stairSide === 'left') ? (vp > 0 ? -1 : 1) : (vp > 0 ? 1 : -1);
+    }
+
+    if (p.stairProgress >= 1) {
+      const s = stairOf(p.stairSide, p.stairLower);
+      p.floor = p.stairLower + 1;
+      p.x = s.tx;
+      p.mode = 'corridor';
+    } else if (p.stairProgress <= 0) {
+      const s = stairOf(p.stairSide, p.stairLower);
+      p.floor = p.stairLower;
+      p.x = s.bx;
+      p.mode = 'corridor';
+    }
+    return;
+  }
+
+  // ---- LIFT ----
+  if (p.mode === 'lift') {
+    // The player's liftY is the lift's y (they move together)
+    let vy = 0;
+    if (keys['ArrowUp']   || keys['w'] || keys['W']) vy -= 1;
+    if (keys['ArrowDown'] || keys['s'] || keys['S']) vy += 1;
+
+    if (vy !== 0) {
+      p.liftY += vy * LIFT_SPEED * dt;
+      // clamp to top/bottom floor levels
+      p.liftY = Math.max(FLOOR_Y[NUM_FLOORS - 1], Math.min(FLOOR_Y[0], p.liftY));
+      game.lift.y = p.liftY;
+    }
+
+    // What floor are we on (or nearest)
+    let nearest = 0, bestD = Infinity;
+    for (let f = 0; f < NUM_FLOORS; f++) {
+      const d = Math.abs(p.liftY - FLOOR_Y[f]);
+      if (d < bestD) { bestD = d; nearest = f; }
+    }
+
+    // Exit lift with LEFT/RIGHT when stopped at a floor.
+    // Use justPressed so we don't snap-exit if the player was holding a direction
+    // when they pressed UP/DOWN to enter the lift.
+    if (bestD < 4 && vy === 0 && (justPressed['ArrowLeft'] || justPressed['ArrowRight']
+        || justPressed['a'] || justPressed['A'] || justPressed['d'] || justPressed['D'])) {
+      const goLeft = justPressed['ArrowLeft'] || justPressed['a'] || justPressed['A'];
+      p.liftY = FLOOR_Y[nearest];
+      game.lift.y = p.liftY;
+      game.lift.currentFloor = nearest;
+      p.floor = nearest;
+      p.x = goLeft ? LIFT_X1 - 4 : LIFT_X2 + 4;
+      p.facing = goLeft ? -1 : 1;
+      p.mode = 'corridor';
+      return;
+    }
+
+    // Snap to nearest if not pressing anything
+    if (vy === 0 && bestD < 1) {
+      p.liftY = FLOOR_Y[nearest];
+      game.lift.y = p.liftY;
+      game.lift.currentFloor = nearest;
+    }
+  }
+}
+
+function atLift(p) {
+  return p.x > LIFT_X1 - 6 && p.x < LIFT_X2 + 6;
+}
+
+function enterStair(p, side, lower, startProgress, dir) {
+  p.mode = 'stair';
+  p.stairSide = side;
+  p.stairLower = lower;
+  p.stairProgress = startProgress;
+  p.stairDir = dir;
+}
+
+function enterLift(p) {
+  p.mode = 'lift';
+  p.liftY = FLOOR_Y[p.floor];
+  game.lift.y = p.liftY;
+  game.lift.called = false;
+  game.lift.calledFloor = null;
+}
+
+function callLift(floor) {
+  if (game.lift.called && game.lift.calledFloor === floor) return;
+  game.lift.called = true;
+  game.lift.calledFloor = floor;
+  addBubble(LIFT_CX, FLOOR_Y[floor] - 26, 'Hissen kommer...', COL.textDim);
+}
+
+function updatePensioners(dt) {
+  for (const pen of game.pensioners) {
+    pen.idleTimer  -= dt;
+    pen.speakTimer -= dt;
+    pen.bobPhase   += dt * 2;
+
+    if (pen.speakTimer <= 0) {
+      pen.speakTimer = 7 + Math.random() * 10;
+      if (Math.random() < 0.35) {
+        const pos = penPos(pen);
+        const phrase = PHRASES_IDLE[Math.floor(Math.random() * PHRASES_IDLE.length)];
+        addBubble(pos.x, pos.y - 20, phrase, COL.textDim);
+      }
+    }
+
+    if (pen.mode === 'corridor') {
+      if (pen.stationary) continue;
+      if (pen.idleTimer > 0) continue;
+      pen.legPhase += dt * 6;
+      let nx = pen.x + pen.dir * pen.speed * dt;
+
+      // bounds + lift collision
+      if (nx < 12) { pen.dir = 1; nx = 12; pen.idleTimer = 0.5 + Math.random() * 1.5; }
+      if (nx > W - 12) { pen.dir = -1; nx = W - 12; pen.idleTimer = 0.5 + Math.random() * 1.5; }
+      if (pen.x < LIFT_X1 && nx > LIFT_X1 - 4) {
+        pen.dir = -1; nx = LIFT_X1 - 4; pen.idleTimer = 0.4 + Math.random() * 1.5;
+      }
+      if (pen.x > LIFT_X2 && nx < LIFT_X2 + 4) {
+        pen.dir = 1; nx = LIFT_X2 + 4; pen.idleTimer = 0.4 + Math.random() * 1.5;
+      }
+      if (Math.random() < 0.002) pen.idleTimer = 1 + Math.random() * 3;
+      if (Math.random() < 0.0015) pen.dir *= -1;
+      pen.x = nx;
+    } else {
+      // stair
+      if (pen.idleTimer > 0) continue;
+      pen.legPhase += dt * 5;
+      pen.stairProgress += pen.stairDir * pen.speed * 0.55 * dt / STAIR_DIAG;
+      if (pen.stairProgress >= 1) {
+        pen.stairProgress = 1; pen.stairDir = -1; pen.idleTimer = 1 + Math.random() * 2;
+      } else if (pen.stairProgress <= 0) {
+        pen.stairProgress = 0; pen.stairDir = 1; pen.idleTimer = 1 + Math.random() * 2;
+      }
+      if (Math.random() < 0.002) pen.idleTimer = 0.5 + Math.random() * 2;
+    }
+  }
+}
+
+function penPos(pen) {
+  if (pen.mode === 'corridor') return { x: pen.x, y: FLOOR_Y[pen.floor] };
+  const s = stairOf(pen.stairSide, pen.stairLower);
+  return {
+    x: s.bx + (s.tx - s.bx) * pen.stairProgress,
+    y: s.by + (s.ty - s.by) * pen.stairProgress,
+  };
+}
+
+function updateBubbles(dt) {
+  for (const b of game.bubbles) b.t -= dt;
+  game.bubbles = game.bubbles.filter(b => b.t > 0);
+}
+
+function updateLift(dt) {
+  if (game.player.mode === 'lift') return;  // player is driving it
+
+  game.lift.callBlinkT += dt;
+
+  if (game.lift.called) {
+    const targetY = FLOOR_Y[game.lift.calledFloor];
+    const dy = targetY - game.lift.y;
+    const step = LIFT_CALL_SPEED * dt;
+    if (Math.abs(dy) <= step) {
+      game.lift.y = targetY;
+      game.lift.currentFloor = game.lift.calledFloor;
+      game.lift.called = false;
+      game.lift.calledFloor = null;
+      addBubble(LIFT_CX, game.lift.y - 30, 'Pling!', COL.highlight);
+    } else {
+      game.lift.y += Math.sign(dy) * step;
+    }
+  } else {
+    game.lift.y = FLOOR_Y[game.lift.currentFloor];
+  }
+}
+
+function addBubble(x, y, text, color) {
+  game.bubbles.push({ x, y, text, color: color || COL.text, t: 1.6, life: 1.6 });
+}
+
+function screenShake(t, m) {
+  game.shakeT = Math.max(game.shakeT, t);
+  game.shakeMag = m || 1.5;
+}
+
+// ====================================================================
+//  Render
+// ====================================================================
+
+function render() {
+  // Screen shake
+  ctx.save();
+  if (game.shakeT > 0) {
+    const sx = (Math.random() - 0.5) * game.shakeMag;
+    const sy = (Math.random() - 0.5) * game.shakeMag;
+    ctx.translate(sx, sy);
+  }
+
+  drawBackground();
+  drawFloors();
+  drawStairs();
+  drawAutomat();
+
+  // ---- Entity rendering ----
+  // Pass 1: stair entities (drawn before lift facade so they get occluded)
+  for (const pen of game.pensioners) {
+    if (pen.mode === 'stair') {
+      const pos = penPos(pen);
+      drawPensioner(pen, pos.x, pos.y);
+    }
+  }
+  if (game.player.mode === 'stair') {
+    const pos = playerWorldPos();
+    drawPlayer(game.player, pos.x, pos.y);
+  }
+
+  // Lift shaft + cab + lift-rider
+  drawLift();
+
+  // Pass 2: corridor entities (no occlusion needed)
+  // Sort by y so lower entities draw on top — adds a tiny depth cue
+  const corridorEnts = [];
+  for (const pen of game.pensioners) {
+    if (pen.mode === 'corridor') corridorEnts.push({ kind: 'pen', data: pen, y: FLOOR_Y[pen.floor], x: pen.x });
+  }
+  if (game.player.mode === 'corridor' || game.player.mode === 'squeeze') {
+    corridorEnts.push({ kind: 'player', data: game.player, y: FLOOR_Y[game.player.floor], x: game.player.x });
+  }
+  corridorEnts.sort((a, b) => a.y - b.y || a.x - b.x);
+  for (const e of corridorEnts) {
+    if (e.kind === 'pen') drawPensioner(e.data, e.x, e.y);
+    else drawPlayer(e.data, e.x, e.y);
+  }
+
+  // Bubbles (always on top)
+  for (const b of game.bubbles) {
+    const t = (b.life - b.t) / b.life;
+    drawBubble(b.x, b.y - t * 10, b.text, b.color, 1 - Math.max(0, t - 0.6) * 2.5);
+  }
+
+  // HUD
+  drawHUD();
+
+  // Hints
+  drawHints();
+
+  // End screens
+  if (game.state === 'won')  drawEndScreen(true);
+  if (game.state === 'lost') drawEndScreen(false);
+
+  ctx.restore();
+}
+
+function ceilOf(f) {
+  // Ceiling y for floor f. Top floor's ceiling sits just under the header.
+  if (f === NUM_FLOORS - 1) return HEADER_H + 1;
+  return FLOOR_Y[f] - FLOOR_HEIGHT + 4;
+}
+
+function drawBackground() {
+  // Wine-red wall fill
+  ctx.fillStyle = COL.wall;
+  ctx.fillRect(0, 0, W, H);
+
+  // Damask wallpaper — repeating fleur motif
+  ctx.fillStyle = COL.damask;
+  for (let y = HEADER_H + 4; y < H; y += 10) {
+    for (let x = 2; x < W; x += 14) {
+      const off = (Math.floor(y / 10) % 2) * 7;
+      const xx = x + off;
+      ctx.fillRect(xx, y, 1, 1);
+      ctx.fillRect(xx - 1, y + 1, 3, 1);
+      ctx.fillRect(xx, y + 2, 1, 1);
+    }
+  }
+  // Wallpaper highlight specks (worn shine)
+  ctx.fillStyle = COL.damaskDim;
+  for (let y = HEADER_H + 9; y < H; y += 10) {
+    for (let x = 8; x < W; x += 14) {
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+
+  // Random water/mold stains and cracks (deterministic positions)
+  ctx.fillStyle = COL.stain;
+  const stainSeeds = [
+    [22,52,3,2],[88,67,2,1],[174,90,4,2],[300,72,3,1],[342,108,2,2],
+    [60,140,3,2],[210,165,2,1],[400,180,4,1],[460,200,3,2],[150,238,2,1],
+    [320,250,3,1],[24,196,4,2],[440,140,2,1],[12,260,3,1],[160,76,2,2],
+  ];
+  for (const [x, y, w, h] of stainSeeds) {
+    ctx.fillRect(x, y, w, h);
+    if (w > 2) ctx.fillRect(x + 1, y - 1, 1, 1);
+  }
+  // Diagonal cracks
+  ctx.fillStyle = COL.wallTrim;
+  const crackSeeds = [[110,55],[270,130],[390,195],[40,230]];
+  for (const [x, y] of crackSeeds) {
+    for (let i = 0; i < 8; i++) ctx.fillRect(x + i, y + (i % 3 === 0 ? 1 : 0), 1, 1);
+  }
+
+  // Header bar — black marble look with gold band
+  ctx.fillStyle = COL.wallDark;
+  ctx.fillRect(0, 0, W, HEADER_H);
+  // Subtle marble veins in header
+  ctx.fillStyle = '#3a1818';
+  for (let i = 0; i < 6; i++) ctx.fillRect((i * 87) % W, 4 + (i % 3) * 8, 12, 1);
+  // Double gold trim under header
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(0, HEADER_H - 2, W, 1);
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(0, HEADER_H - 1, W, 1);
+}
+
+function drawFloors() {
+  for (let f = 0; f < NUM_FLOORS; f++) {
+    const fy = FLOOR_Y[f];
+    const cy = ceilOf(f);
+    const dadoY = fy - 14;
+
+    // Cream plaster ceiling (above the crown molding)
+    ctx.fillStyle = COL.cream;
+    ctx.fillRect(0, cy - 4, W, 4);
+    ctx.fillStyle = COL.creamDim;
+    ctx.fillRect(0, cy - 4, W, 1);
+    // Coffered ceiling pattern
+    ctx.fillStyle = COL.creamDim;
+    for (let x = 8; x < W; x += 16) ctx.fillRect(x, cy - 3, 1, 2);
+
+    // Crown molding — gold + tarnish
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(0, cy, W, 1);
+    ctx.fillStyle = COL.goldDark;
+    ctx.fillRect(0, cy + 1, W, 1);
+    // Egg-and-dart ornament dots
+    ctx.fillStyle = COL.goldBright;
+    for (let x = 3; x < W; x += 5) ctx.fillRect(x, cy - 1, 1, 1);
+
+    // Wainscoting / dark wood paneling (lower wall)
+    ctx.fillStyle = '#3a1810';
+    ctx.fillRect(0, dadoY + 1, W, fy - dadoY - 1);
+    // Vertical panel splits
+    ctx.fillStyle = '#1a0808';
+    for (let x = 14; x < W; x += 28) ctx.fillRect(x, dadoY + 1, 1, fy - dadoY - 1);
+    // Dado rail (gold)
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(0, dadoY, W, 1);
+    ctx.fillStyle = COL.goldBright;
+    ctx.fillRect(0, dadoY - 1, W, 1);
+
+    // Crimson carpet runner — center of the floor
+    ctx.fillStyle = COL.carpet;
+    ctx.fillRect(0, fy + 1, W, 5);
+    ctx.fillStyle = COL.carpetMid;
+    ctx.fillRect(0, fy + 1, W, 1);
+    // Gold zigzag pattern
+    ctx.fillStyle = COL.carpetGold;
+    for (let x = 0; x < W; x += 4) {
+      const yp = fy + 3 + ((Math.floor(x / 2) % 2) ? 0 : 1);
+      ctx.fillRect(x, yp, 2, 1);
+    }
+    // Carpet edges
+    ctx.fillStyle = COL.goldDark;
+    ctx.fillRect(0, fy + 6, W, 1);
+
+    // Stone floor below carpet
+    ctx.fillStyle = '#1a0a06';
+    ctx.fillRect(0, fy + 7, W, 4);
+    ctx.fillStyle = '#2a1408';
+    ctx.fillRect(0, fy + 7, W, 1);
+
+    // Floor numeral (Roman)
+    drawTinyText(3, cy + 9, ['I','II','III','IV'][f], COL.gold);
+
+    drawDoors(f, fy);
+    drawWallDecor(f, fy, cy, dadoY);
+  }
+
+  // Chandeliers: one per floor, between corridor and lift on each side
+  for (let f = 0; f < NUM_FLOORS; f++) {
+    const cy = ceilOf(f);
+    drawChandelier(120, cy, f);
+    drawChandelier(360, cy, f);
+  }
+}
+
+function drawDoors(f, fy) {
+  const doorYTop = fy - 26;
+  const doorH = 26;
+  const positions = [42, 86, 130, 166, 320, 358, 402, 446];
+  let roomIdx = 0;
+  for (const x of positions) {
+    if (skipDoorAt(x, f)) continue;
+    roomIdx++;
+
+    // Triangular pediment crown above door
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(x - 8, doorYTop - 4, 16, 1);
+    ctx.fillStyle = COL.goldDark;
+    ctx.fillRect(x - 8, doorYTop - 3, 16, 1);
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(x - 4, doorYTop - 6, 8, 1);
+    ctx.fillRect(x - 2, doorYTop - 7, 4, 1);
+    ctx.fillStyle = COL.goldBright;
+    ctx.fillRect(x, doorYTop - 7, 1, 1);
+
+    // Door frame (dark wood, slightly wider than door)
+    ctx.fillStyle = '#1a0804';
+    ctx.fillRect(x - 7, doorYTop - 2, 14, doorH + 2);
+
+    // Door panel — rich mahogany
+    ctx.fillStyle = '#3a1808';
+    ctx.fillRect(x - 6, doorYTop - 1, 12, doorH);
+    // Inset panels (top + bottom)
+    ctx.fillStyle = '#2a1004';
+    ctx.fillRect(x - 4, doorYTop + 1, 8, 8);
+    ctx.fillRect(x - 4, doorYTop + 12, 8, 11);
+    ctx.fillStyle = '#5a2410';
+    ctx.fillRect(x - 4, doorYTop + 1, 8, 1);
+    ctx.fillRect(x - 4, doorYTop + 12, 8, 1);
+
+    // Brass knob
+    ctx.fillStyle = COL.goldBright;
+    ctx.fillRect(x + 3, doorYTop + 13, 1, 2);
+    ctx.fillStyle = COL.goldDark;
+    ctx.fillRect(x + 3, doorYTop + 15, 1, 1);
+
+    // Room number (gilt) — floor 1 → 101, 102…  floor 4 → 401, 402…
+    const roomNum = `${f + 1}${String(roomIdx).padStart(2,'0')}`;
+    drawTinyText(x - 7, doorYTop - 9, roomNum, COL.goldBright);
+  }
+}
+
+function skipDoorAt(x, f) {
+  if (x > LIFT_X1 - 14 && x < LIFT_X2 + 14) return true;
+  if (Math.abs(x - (LIFT_X1 - STAIR_GAP)) < 12) return true;
+  if (Math.abs(x - (LIFT_X2 + STAIR_GAP)) < 12) return true;
+  if (f < NUM_FLOORS - 1) {
+    if (Math.abs(x - (LIFT_X1 - STAIR_GAP - STAIR_RUN)) < 12) return true;
+    if (Math.abs(x - (LIFT_X2 + STAIR_GAP + STAIR_RUN)) < 12) return true;
+  }
+  return false;
+}
+
+function drawWallDecor(f, fy, cy, dadoY) {
+  // Pilasters — slim gilded columns between doors, on the upper wall
+  const pilasterX = [22, 64, 108, 188, 292, 380, 424, 466];
+  for (const x of pilasterX) {
+    if (x > LIFT_X1 - 14 && x < LIFT_X2 + 14) continue;
+    drawPilaster(x, cy + 2, dadoY - 1);
+  }
+
+  // Framed paintings — between the doors, on the upper wall
+  const paintingX = [60, 110, 380, 420];
+  for (const x of paintingX) {
+    if (x > LIFT_X1 - 14 && x < LIFT_X2 + 14) continue;
+    if (Math.abs(x - (LIFT_X1 - STAIR_GAP)) < 14) continue;
+    if (Math.abs(x - (LIFT_X2 + STAIR_GAP)) < 14) continue;
+    if (f < NUM_FLOORS - 1) {
+      if (Math.abs(x - (LIFT_X1 - STAIR_GAP - STAIR_RUN)) < 14) continue;
+      if (Math.abs(x - (LIFT_X2 + STAIR_GAP + STAIR_RUN)) < 14) continue;
+    }
+    drawPainting(x, dadoY - 6, (f * 7 + x) % 3);
+  }
+}
+
+function drawPilaster(x, top, bot) {
+  const h = bot - top;
+  if (h < 6) return;
+  // Capital
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(x - 1, top, 4, 1);
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(x - 1, top + 1, 4, 1);
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(x - 1, top + 2, 4, 1);
+  // Shaft (faux fluting)
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(x, top + 3, 2, h - 6);
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(x, top + 3, 1, h - 6);
+  // Base
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(x - 1, bot - 3, 4, 1);
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(x - 1, bot - 2, 4, 1);
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(x - 1, bot - 1, 4, 1);
+}
+
+function drawPainting(x, y, variant) {
+  // Outer gold frame
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(x - 7, y - 11, 14, 14);
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(x - 7, y - 11, 14, 1);
+  ctx.fillRect(x - 7, y - 11, 1, 14);
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(x - 7, y + 2, 14, 1);
+  ctx.fillRect(x + 6, y - 11, 1, 14);
+
+  // Painting interior
+  ctx.fillStyle = COL.paint;
+  ctx.fillRect(x - 5, y - 9, 10, 10);
+
+  if (variant === 0) {
+    // Imperial portrait silhouette
+    ctx.fillStyle = '#1a0a04';
+    ctx.fillRect(x - 1, y - 7, 2, 2); // head
+    ctx.fillRect(x - 3, y - 5, 6, 4); // shoulders
+    ctx.fillStyle = '#7a3030';
+    ctx.fillRect(x - 4, y - 3, 8, 2); // sash
+  } else if (variant === 1) {
+    // Alpine landscape
+    ctx.fillStyle = '#5a4838';
+    ctx.fillRect(x - 5, y - 1, 10, 1);
+    ctx.fillStyle = '#3a2818';
+    ctx.fillRect(x - 4, y - 5, 3, 4);
+    ctx.fillRect(x - 2, y - 7, 3, 6);
+    ctx.fillRect(x + 1, y - 4, 4, 5);
+    ctx.fillStyle = '#7a6850';
+    ctx.fillRect(x - 1, y - 8, 1, 1); // peak snow
+  } else {
+    // Floral still life
+    ctx.fillStyle = '#7a3030';
+    ctx.fillRect(x - 1, y - 6, 2, 2);
+    ctx.fillStyle = '#a04040';
+    ctx.fillRect(x - 2, y - 5, 1, 1);
+    ctx.fillStyle = '#3a5a30';
+    ctx.fillRect(x, y - 3, 1, 4);
+    ctx.fillRect(x - 1, y - 1, 3, 1);
+  }
+}
+
+function drawChandelier(x, ceilY, seed) {
+  // Cord
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(x, ceilY + 2, 1, 4);
+  // Crown
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(x - 1, ceilY + 6, 3, 2);
+  // Tier 1 (wide)
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(x - 3, ceilY + 8, 7, 2);
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(x - 3, ceilY + 10, 7, 1);
+  // Crystals dripping
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(x - 4, ceilY + 9, 1, 2);
+  ctx.fillRect(x + 4, ceilY + 9, 1, 2);
+  ctx.fillRect(x - 2, ceilY + 11, 1, 1);
+  ctx.fillRect(x, ceilY + 11, 1, 2);
+  ctx.fillRect(x + 2, ceilY + 11, 1, 1);
+  // Subtle glow halo
+  ctx.globalAlpha = 0.10;
+  ctx.fillStyle = '#fae0a0';
+  ctx.fillRect(x - 6, ceilY + 6, 13, 8);
+  ctx.fillRect(x - 5, ceilY + 5, 11, 10);
+  ctx.globalAlpha = 1;
+}
+
+function drawStairs() {
+  for (let lower = 0; lower < NUM_FLOORS - 1; lower++) {
+    drawStair(leftStair(lower));
+    drawStair(rightStair(lower));
+  }
+}
+
+function drawStair(s) {
+  const dx = s.tx - s.bx;
+  const dy = s.ty - s.by;
+  const steps = 14;
+
+  // Underside support (dark wood)
+  ctx.fillStyle = COL.stair;
+  ctx.beginPath();
+  ctx.moveTo(s.bx, s.by + 6);
+  ctx.lineTo(s.tx, s.ty + 6);
+  ctx.lineTo(s.tx, s.by + 6);
+  ctx.closePath();
+  ctx.fill();
+
+  // Worn marble treads with carpet runner
+  for (let i = 0; i < steps; i++) {
+    const t1 = i / steps;
+    const t2 = (i + 1) / steps;
+    const x1 = s.bx + dx * t1;
+    const y1 = s.by + dy * t1;
+    const x2 = s.bx + dx * t2;
+    const y2 = s.by + dy * t2;
+    const tx = Math.min(x1, x2);
+    const tw = Math.abs(x2 - x1) + 1;
+    // Marble tread
+    ctx.fillStyle = COL.stairTread;
+    ctx.fillRect(tx, y2, tw, 2);
+    // Carpet on tread (red center)
+    ctx.fillStyle = COL.carpet;
+    ctx.fillRect(tx, y2, tw, 1);
+    // Riser
+    ctx.fillStyle = COL.stair;
+    ctx.fillRect(tx, y2 + 2, tw, Math.max(1, Math.abs(y1 - y2)));
+    // Gold tread edge nosing
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(tx, y2 + 1, tw, 1);
+  }
+
+  // Ornate brass railing
+  ctx.strokeStyle = COL.stairRail;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(s.bx, s.by - 14);
+  ctx.lineTo(s.tx, s.ty - 14);
+  ctx.stroke();
+  // Newel posts
+  for (let i = 0; i <= 6; i++) {
+    const t = i / 6;
+    const x = s.bx + dx * t;
+    const y = s.by + dy * t;
+    ctx.fillStyle = COL.stairRail;
+    ctx.fillRect(x, y - 14, 1, 14);
+    if (i === 0 || i === 6) {
+      // Decorative finial at the ends
+      ctx.fillStyle = COL.goldBright;
+      ctx.fillRect(x - 1, y - 16, 3, 2);
+    }
+  }
+
+  // Hint markers at corridor entry points
+  drawTinyText(s.bx - 2, s.by - 32, '↑', COL.goldDark);
+  drawTinyText(s.tx - 2, s.ty - 32, '↓', COL.goldDark);
+}
+
+function drawLift() {
+  // Shaft (deep black)
+  ctx.fillStyle = COL.liftShaft;
+  ctx.fillRect(LIFT_X1, HEADER_H + 4, LIFT_W, FLOOR_Y[0] - HEADER_H + 4);
+
+  // Ornate gilded outer frame around the shaft
+  ctx.fillStyle = COL.liftFrame;
+  ctx.fillRect(LIFT_X1 - 3, HEADER_H + 2, 3, FLOOR_Y[0] - HEADER_H + 8);
+  ctx.fillRect(LIFT_X2,     HEADER_H + 2, 3, FLOOR_Y[0] - HEADER_H + 8);
+  ctx.fillStyle = COL.liftFrameH;
+  ctx.fillRect(LIFT_X1 - 3, HEADER_H + 2, 1, FLOOR_Y[0] - HEADER_H + 8);
+  ctx.fillRect(LIFT_X2 + 2, HEADER_H + 2, 1, FLOOR_Y[0] - HEADER_H + 8);
+
+  // Gilded crown above the lift shaft (architectural pediment)
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(LIFT_X1 - 8, HEADER_H + 1, LIFT_W + 16, 2);
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(LIFT_X1 - 8, HEADER_H + 1, LIFT_W + 16, 1);
+  // Centered ornament (eagle/star suggestion)
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(LIFT_X1 + LIFT_W / 2 - 1, HEADER_H - 1, 3, 1);
+  ctx.fillRect(LIFT_X1 + LIFT_W / 2,     HEADER_H - 2, 1, 1);
+
+  // Floor stop arches in shaft
+  for (let f = 0; f < NUM_FLOORS; f++) {
+    const fy = FLOOR_Y[f];
+    ctx.fillStyle = COL.liftFrame;
+    ctx.fillRect(LIFT_X1 + 2, fy - 30, LIFT_W - 4, 1);
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(LIFT_X1 + 4, fy - 31, LIFT_W - 8, 1);
+    // Tiny call button — blinks red on the floor that summoned the lift
+    const lit = game.lift.called && game.lift.calledFloor === f
+      && (Math.floor(game.lift.callBlinkT * 4) % 2 === 0);
+    ctx.fillStyle = lit ? COL.warn : COL.goldBright;
+    ctx.fillRect(LIFT_X1 - 2, fy - 18, 1, 1);
+    ctx.fillRect(LIFT_X2 + 1, fy - 18, 1, 1);
+  }
+
+  // Lift cab
+  const ly = game.lift.y;
+  // Cab outer (gilt)
+  ctx.fillStyle = COL.liftFrameH;
+  ctx.fillRect(LIFT_X1 + 1, ly - 30, LIFT_W - 2, 2);
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(LIFT_X1 + 1, ly - 28, LIFT_W - 2, 1);
+  // Cab walls
+  ctx.fillStyle = COL.liftCab;
+  ctx.fillRect(LIFT_X1 + 2, ly - 28, LIFT_W - 4, 28);
+  ctx.fillStyle = COL.liftCabIn;
+  ctx.fillRect(LIFT_X1 + 3, ly - 27, LIFT_W - 6, 26);
+  // Mirror back wall
+  ctx.fillStyle = '#3a1828';
+  ctx.fillRect(LIFT_X1 + 6, ly - 24, LIFT_W - 12, 14);
+  ctx.fillStyle = '#5a2848';
+  ctx.fillRect(LIFT_X1 + 6, ly - 24, LIFT_W - 12, 1);
+
+  if (game.player.mode !== 'lift') {
+    // Closed door — gilded panels with seam
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(LIFT_CX - 0.5, ly - 27, 1, 26);
+    ctx.fillStyle = COL.liftCabIn;
+    ctx.fillRect(LIFT_X1 + 5, ly - 24, 7, 18);
+    ctx.fillRect(LIFT_X1 + 13, ly - 24, 7, 18);
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(LIFT_X1 + 5, ly - 24, 7, 1);
+    ctx.fillRect(LIFT_X1 + 13, ly - 24, 7, 1);
+    // Tiny ornament on each door
+    ctx.fillStyle = COL.goldBright;
+    ctx.fillRect(LIFT_X1 + 8, ly - 18, 1, 1);
+    ctx.fillRect(LIFT_X1 + 16, ly - 18, 1, 1);
+  }
+
+  // Floor indicator dial above the lift
+  ctx.fillStyle = COL.liftShaft;
+  ctx.fillRect(LIFT_X1 + 6, ly - 36, LIFT_W - 12, 5);
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(LIFT_X1 + 6, ly - 36, LIFT_W - 12, 1);
+  let f = 0, bd = Infinity;
+  for (let i = 0; i < NUM_FLOORS; i++) {
+    const d = Math.abs(ly - FLOOR_Y[i]);
+    if (d < bd) { bd = d; f = i; }
+  }
+  drawTinyText(LIFT_X1 + 8, ly - 32, ['I','II','III','IV'][f], COL.goldBright);
+
+  // Player inside lift
+  if (game.player.mode === 'lift') {
+    drawPlayer(game.player, LIFT_CX, ly);
+  }
+}
+
+function drawAutomat() {
+  const fy = FLOOR_Y[0];
+  const x = W - 22;
+  const y = fy - 32;
+  // Body
+  ctx.fillStyle = '#3a4a3a';
+  ctx.fillRect(x, y, 18, 32);
+  ctx.fillStyle = '#5a6a5a';
+  ctx.fillRect(x + 1, y + 1, 16, 30);
+  // Screen
+  const pulse = 0.5 + 0.5 * Math.sin(game.automatPulse * 4);
+  ctx.fillStyle = `rgba(244, 208, 63, ${0.4 + 0.6 * pulse})`;
+  ctx.fillRect(x + 3, y + 3, 12, 8);
+  // Slot
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(x + 4, y + 14, 10, 1);
+  // Buttons
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(x + 4, y + 18, 2, 2);
+  ctx.fillRect(x + 8, y + 18, 2, 2);
+  ctx.fillRect(x + 12, y + 18, 2, 2);
+  ctx.fillRect(x + 4, y + 22, 2, 2);
+  ctx.fillRect(x + 8, y + 22, 2, 2);
+  ctx.fillRect(x + 12, y + 22, 2, 2);
+  // Card slot label
+  drawTinyText(x - 1, y - 4, 'AUTOMAT', COL.highlight);
+}
+
+// ---- Sprites ----
+function drawPensioner(pen, x, y) {
+  const bob = Math.sin(pen.bobPhase) * 0.5;
+  const yy = Math.round(y + bob);
+  const c = pen.coatColor;
+  const skin = '#f0c896';
+  const dark = '#1a120c';
+
+  if (pen.style === 'sport') {
+    drawSportPensioner(pen, x, yy, c, skin, dark);
+  } else {
+    drawFormalPensioner(pen, x, yy, c, skin, dark);
+  }
+}
+
+function drawFormalPensioner(pen, x, yy, c, skin, dark) {
+  // Cane (some have one) — for formal types only
+  const hasCane = (pen.bobPhase * 7 | 0) % 4 === 0;
+  if (hasCane) {
+    ctx.fillStyle = '#7a5a3a';
+    ctx.fillRect(x + 3, yy - 12, 1, 12);
+  }
+
+  // Legs (dark trousers / stockings)
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(x - 2, yy - 4, 1, 4);
+  ctx.fillRect(x + 1, yy - 4, 1, 4);
+  // Polished black shoes
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x - 3, yy - 1, 2, 1);
+  ctx.fillRect(x + 1, yy - 1, 2, 1);
+
+  // Coat / dress
+  if (pen.female) {
+    ctx.fillStyle = c;
+    ctx.fillRect(x - 3, yy - 12, 7, 8);
+    ctx.fillRect(x - 4, yy - 6, 9, 2); // skirt flare
+    // brooch
+    ctx.fillStyle = COL.gold;
+    ctx.fillRect(x, yy - 11, 1, 1);
+  } else {
+    ctx.fillStyle = c;
+    ctx.fillRect(x - 3, yy - 12, 6, 8);
+    // Shirt collar
+    ctx.fillStyle = '#dddddd';
+    ctx.fillRect(x - 1, yy - 10, 2, 4);
+    // Tie
+    ctx.fillStyle = '#883333';
+    ctx.fillRect(x, yy - 9, 1, 3);
+  }
+
+  // Arms
+  ctx.fillStyle = c;
+  ctx.fillRect(x - 4, yy - 11, 1, 5);
+  ctx.fillRect(x + 3, yy - 11, 1, 5);
+
+  // Head
+  ctx.fillStyle = skin;
+  ctx.fillRect(x - 2, yy - 17, 4, 5);
+  // Hair
+  ctx.fillStyle = pen.hairColor;
+  if (pen.female) {
+    ctx.fillRect(x - 3, yy - 18, 6, 3);
+    ctx.fillRect(x - 3, yy - 15, 1, 2);
+    ctx.fillRect(x + 2, yy - 15, 1, 2);
+  } else {
+    ctx.fillRect(x - 3, yy - 17, 6, 1);
+    ctx.fillRect(x - 3, yy - 16, 1, 2);
+    ctx.fillRect(x + 2, yy - 16, 1, 2);
+  }
+  // Glasses
+  if (pen.hasGlasses) {
+    ctx.fillStyle = dark;
+    ctx.fillRect(x - 2, yy - 14, 1, 1);
+    ctx.fillRect(x + 1, yy - 14, 1, 1);
+    ctx.fillRect(x, yy - 14, 1, 1);
+  }
+}
+
+function drawSportPensioner(pen, x, yy, c, skin, dark) {
+  // White sneakers (chunky)
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(x - 3, yy - 1, 3, 1);
+  ctx.fillRect(x + 1, yy - 1, 3, 1);
+  // Sneaker stripe
+  ctx.fillStyle = c;
+  ctx.fillRect(x - 3, yy - 1, 1, 1);
+  ctx.fillRect(x + 3, yy - 1, 1, 1);
+
+  // Tracksuit pants (same color as top, with a white stripe)
+  ctx.fillStyle = c;
+  ctx.fillRect(x - 2, yy - 4, 1, 3);
+  ctx.fillRect(x + 1, yy - 4, 1, 3);
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(x - 2, yy - 4, 1, 1);
+  ctx.fillRect(x + 1, yy - 4, 1, 1);
+
+  // Tracksuit jacket
+  ctx.fillStyle = c;
+  ctx.fillRect(x - 3, yy - 12, 6, 8);
+  // Zipper line
+  ctx.fillStyle = '#1a1a1a';
+  ctx.fillRect(x, yy - 11, 1, 6);
+  // Vertical white side stripes (the hallmark Adidas pensioner)
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(x - 3, yy - 11, 1, 7);
+  ctx.fillRect(x + 2, yy - 11, 1, 7);
+
+  // Arms
+  ctx.fillStyle = c;
+  ctx.fillRect(x - 4, yy - 11, 1, 5);
+  ctx.fillRect(x + 3, yy - 11, 1, 5);
+  // Arm stripe
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(x - 4, yy - 11, 1, 1);
+  ctx.fillRect(x + 3, yy - 11, 1, 1);
+
+  // Head
+  ctx.fillStyle = skin;
+  ctx.fillRect(x - 2, yy - 17, 4, 5);
+
+  // Cap
+  const brimDir = pen.female ? 0 : 1; // some forward, some no brim
+  ctx.fillStyle = pen.capColor;
+  ctx.fillRect(x - 3, yy - 19, 6, 2);  // top of cap
+  ctx.fillRect(x - 2, yy - 17, 4, 1);  // band
+  // Brim sticking out
+  ctx.fillRect(x + 2, yy - 17, 2, 1);
+
+  // White hair tuft poking out the back/sides (some)
+  if (Math.random() < 0.0001 || pen.hairColor) {
+    ctx.fillStyle = pen.hairColor;
+    ctx.fillRect(x - 3, yy - 16, 1, 1);
+    ctx.fillRect(x + 2, yy - 16, 1, 1);
+  }
+
+  // Cap logo dot
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(x, yy - 18, 1, 1);
+
+  // Glasses (sportier, smaller)
+  if (pen.hasGlasses) {
+    ctx.fillStyle = dark;
+    ctx.fillRect(x - 2, yy - 14, 1, 1);
+    ctx.fillRect(x + 1, yy - 14, 1, 1);
+  }
+}
+
+function drawPlayer(p, x, y) {
+  const bob = Math.sin(p.walkPhase) * 0.5;
+  const yy = Math.round(y + bob);
+  const f = p.facing;
+  const skin = '#f0c896';
+
+  // Squeeze pose: lean forward + slight color flash
+  const squeezing = p.mode === 'squeeze';
+  const lean = squeezing ? f * 1 : 0;
+
+  // Legs
+  const lp = (p.mode === 'corridor' || p.mode === 'stair') ? Math.sin(p.walkPhase) : 0;
+  ctx.fillStyle = '#2a3a4a';
+  ctx.fillRect(x - 2, yy - 4, 1, 4 - Math.max(0, lp));
+  ctx.fillRect(x + 1, yy - 4, 1, 4 + Math.min(0, lp));
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x - 3, yy - 1, 2, 1);
+  ctx.fillRect(x + 1, yy - 1, 2, 1);
+
+  // Pants
+  ctx.fillStyle = '#3a4a6a';
+  ctx.fillRect(x - 2, yy - 8, 4, 4);
+
+  // Backpack (behind)
+  ctx.fillStyle = '#5a4030';
+  ctx.fillRect(x - 3 - f, yy - 11, 2, 6);
+  ctx.fillStyle = '#8a6048';
+  ctx.fillRect(x - 3 - f, yy - 11, 2, 1);
+
+  // Shirt
+  ctx.fillStyle = squeezing ? '#e07050' : '#c4524a';
+  ctx.fillRect(x - 2 + lean, yy - 12, 4, 5);
+  // Arms
+  ctx.fillStyle = squeezing ? '#e07050' : '#c4524a';
+  ctx.fillRect(x - 3 + lean, yy - 11, 1, 4);
+  ctx.fillRect(x + 2 + lean, yy - 11, 1, 4);
+  // Hands
+  ctx.fillStyle = skin;
+  ctx.fillRect(x - 3 + lean, yy - 7, 1, 1);
+  ctx.fillRect(x + 2 + lean, yy - 7, 1, 1);
+
+  // Head
+  ctx.fillStyle = skin;
+  ctx.fillRect(x - 2 + lean, yy - 17, 4, 5);
+  // Hair (brown)
+  ctx.fillStyle = '#3e2a1a';
+  ctx.fillRect(x - 2 + lean, yy - 18, 4, 2);
+  ctx.fillRect(x - 3 + lean, yy - 17, 1, 1);
+  ctx.fillRect(x + 2 + lean, yy - 17, 1, 1);
+
+  // Eye (single, indicates direction)
+  ctx.fillStyle = '#1a120c';
+  if (f > 0) ctx.fillRect(x + 1 + lean, yy - 14, 1, 1);
+  else        ctx.fillRect(x - 2 + lean, yy - 14, 1, 1);
+
+  // Squeeze sweat drop
+  if (squeezing) {
+    ctx.fillStyle = '#7ec8e3';
+    const off = (Math.sin(game.elapsed * 30) > 0) ? 1 : 0;
+    ctx.fillRect(x + 3, yy - 16 + off, 1, 2);
+  }
+}
+
+function playerWorldPos() {
+  const p = game.player;
+  if (p.mode === 'stair') {
+    const s = stairOf(p.stairSide, p.stairLower);
+    return {
+      x: s.bx + (s.tx - s.bx) * p.stairProgress,
+      y: s.by + (s.ty - s.by) * p.stairProgress,
+    };
+  }
+  if (p.mode === 'lift') return { x: LIFT_CX, y: p.liftY };
+  return { x: p.x, y: FLOOR_Y[p.floor] };
+}
+
+function drawBubble(x, y, text, color, alpha) {
+  alpha = Math.max(0, Math.min(1, alpha));
+  ctx.font = '6px monospace';
+  const w = ctx.measureText(text).width + 4;
+  const h = 9;
+  // Shadow
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = COL.bubbleEdge;
+  ctx.fillRect(Math.round(x - w/2), Math.round(y - h), Math.round(w), h);
+  ctx.fillStyle = COL.bubbleBg;
+  ctx.fillRect(Math.round(x - w/2 + 1), Math.round(y - h + 1), Math.round(w - 2), h - 2);
+  // Tail
+  ctx.fillStyle = COL.bubbleEdge;
+  ctx.fillRect(Math.round(x), Math.round(y), 1, 1);
+  ctx.fillRect(Math.round(x - 1), Math.round(y - 1), 3, 1);
+  // Text
+  ctx.fillStyle = color;
+  ctx.fillText(text, Math.round(x - w/2 + 2), Math.round(y - 2));
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD() {
+  // Top bar
+  ctx.fillStyle = COL.text;
+  ctx.font = 'bold 10px monospace';
+  ctx.fillText('HOTEL ZLATÝ DUKÁT', 6, 11);
+
+  // Timer
+  const tColor = game.timer < 15 ? COL.warn : (game.timer < 30 ? COL.highlight : COL.text);
+  ctx.fillStyle = tColor;
+  ctx.font = 'bold 12px monospace';
+  const ts = `${Math.ceil(game.timer)}s`;
+  ctx.fillText(ts, W / 2 - ctx.measureText(ts).width / 2, 12);
+
+  // Card status
+  ctx.fillStyle = COL.warn;
+  ctx.font = '8px monospace';
+  const card = 'CARD: DEAD';
+  ctx.fillText(card, W - ctx.measureText(card).width - 6, 11);
+
+  // Mini progress bar
+  const barW = 80, barH = 3;
+  const bx = W / 2 - barW / 2, by = 18;
+  ctx.fillStyle = COL.wallTrim;
+  ctx.fillRect(bx, by, barW, barH);
+  ctx.fillStyle = tColor;
+  ctx.fillRect(bx, by, barW * Math.max(0, game.timer / TIME_LIMIT), barH);
+
+  // Floor indicator (left)
+  ctx.fillStyle = COL.textDim;
+  ctx.font = '8px monospace';
+  let floorLabel = '';
+  const p = game.player;
+  if (p.mode === 'corridor' || p.mode === 'squeeze') floorLabel = `FLOOR ${p.floor + 1}`;
+  else if (p.mode === 'stair') floorLabel = `STAIR ${p.stairLower + 1}-${p.stairLower + 2}`;
+  else floorLabel = `LIFT`;
+  ctx.fillText(floorLabel, 6, 24);
+
+  // Encounter counter (right)
+  const enc = `${game.happyCount}♥ ${game.angryCount}!`;
+  ctx.fillStyle = COL.textDim;
+  ctx.fillText(enc, W - ctx.measureText(enc).width - 6, 24);
+}
+
+function drawHints() {
+  const p = game.player;
+  if (p.mode !== 'corridor') return;
+
+  // Hint to squeeze when adjacent to a pensioner
+  for (const pen of game.pensioners) {
+    if (pen.mode !== 'corridor' || pen.floor !== p.floor) continue;
+    if (Math.abs(pen.x - p.x) < SQUEEZE_RANGE + 2) {
+      drawTinyText(p.x - 8, FLOOR_Y[p.floor] - 28, '[SPACE]', COL.highlight);
+      break;
+    }
+  }
+
+  // Hint at stair / lift entries
+  const lb = LIFT_X1 - STAIR_GAP;
+  const rb = LIFT_X2 + STAIR_GAP;
+  if (p.floor < NUM_FLOORS - 1) {
+    if (Math.abs(p.x - lb) < ENTRY_TOLERANCE) drawTinyText(lb - 4, FLOOR_Y[p.floor] - 28, '[↑]', COL.highlight);
+    if (Math.abs(p.x - rb) < ENTRY_TOLERANCE) drawTinyText(rb - 4, FLOOR_Y[p.floor] - 28, '[↑]', COL.highlight);
+  }
+  if (p.floor > 0) {
+    const ltX = LIFT_X1 - STAIR_GAP - STAIR_RUN;
+    const rtX = LIFT_X2 + STAIR_GAP + STAIR_RUN;
+    if (Math.abs(p.x - ltX) < ENTRY_TOLERANCE) drawTinyText(ltX - 4, FLOOR_Y[p.floor] - 28, '[↓]', COL.highlight);
+    if (Math.abs(p.x - rtX) < ENTRY_TOLERANCE) drawTinyText(rtX - 4, FLOOR_Y[p.floor] - 28, '[↓]', COL.highlight);
+  }
+  if (atLift(p)) {
+    if (!game.lift.called && game.lift.currentFloor === p.floor) {
+      drawTinyText(LIFT_CX - 8, FLOOR_Y[p.floor] - 28, '[↑↓]', COL.highlight);
+    } else if (game.lift.called) {
+      drawTinyText(LIFT_CX - 12, FLOOR_Y[p.floor] - 28, 'WAIT...', COL.warn);
+    } else {
+      drawTinyText(LIFT_CX - 12, FLOOR_Y[p.floor] - 28, '[↑↓ CALL]', COL.highlight);
+    }
+  }
+}
+
+function drawEndScreen(won) {
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.font = 'bold 24px monospace';
+  ctx.fillStyle = won ? COL.ok : COL.warn;
+  const title = won ? 'CARD CHARGED' : 'TIME UP';
+  ctx.fillText(title, W / 2 - ctx.measureText(title).width / 2, H / 2 - 18);
+
+  ctx.font = '10px monospace';
+  ctx.fillStyle = COL.text;
+  const sub = won
+    ? `${(TIME_LIMIT - game.timer).toFixed(1)}s · ${game.happyCount} happy · ${game.angryCount} angry`
+    : `Reception is closed. The pensioners win.`;
+  ctx.fillText(sub, W / 2 - ctx.measureText(sub).width / 2, H / 2);
+
+  ctx.font = '10px monospace';
+  ctx.fillStyle = COL.highlight;
+  const r = 'press R to restart';
+  ctx.fillText(r, W / 2 - ctx.measureText(r).width / 2, H / 2 + 16);
+}
+
+function drawTinyText(x, y, text, color) {
+  ctx.font = '6px monospace';
+  ctx.fillStyle = color || COL.text;
+  ctx.fillText(text, x, y);
+}
+
+// ====================================================================
+//  Main loop
+// ====================================================================
+
+let lastT = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+  update(dt);
+  // Clear with a black bar (overscan look)
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  render();
+  // Clear just-pressed for this frame
+  for (const k in justPressed) delete justPressed[k];
+  requestAnimationFrame(frame);
+}
+
+newGame();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
