@@ -87,8 +87,8 @@ const PLAYER_SPEED = 80;
 const STAIR_SPEED = 60;
 const LIFT_SPEED = 100;
 const LIFT_CALL_SPEED = 22;     // glacial — the lift "takes ages" when summoned
-const PEN_SPEED_MIN = 10;
-const PEN_SPEED_MAX = 22;
+const PEN_SPEED_MIN = 4;
+const PEN_SPEED_MAX = 11;
 
 const SQUEEZE_TIME = 0.7;
 const SQUEEZE_RANGE = 12;
@@ -268,6 +268,13 @@ function makePensionerBase(i) {
   const scarfColors = ['#a85a5a', '#5a8aa8', '#7a8a5a', '#aa9050', '#9a7585', '#b0a075', '#c89878'];
   const neckScarfColors = ['#7a8a98', '#a87858', '#9a6868', '#7a7858', '#586878'];
 
+  // Chest detail: cardigan, v-neck, crew-neck, striped knit, or plain. Picked uniformly.
+  const chestStyles = ['cardigan', 'cardigan', 'vneck', 'crew', 'striped', 'plain'];
+  const chestStyle = chestStyles[Math.floor(Math.random() * chestStyles.length)];
+  const shirtColors  = ['#d8d0b0', '#c8c8d0', '#d0c8a8', '#b8c0c8', '#e0d8c0'];
+  const buttonColors = ['#1a1a1a', '#a8804a', '#5a3a2a', '#3a3838'];
+  const knitAccents  = ['#d8c8a8', '#a8a090', '#8a7868', '#c8b898'];
+
   return {
     coatColor: coats[Math.floor(Math.random() * coats.length)],
     hairColor: hairs[Math.floor(Math.random() * hairs.length)],
@@ -275,7 +282,11 @@ function makePensionerBase(i) {
     hatColor: (hat === 'scarf' ? scarfColors : hatColors)[
       Math.floor(Math.random() * (hat === 'scarf' ? scarfColors.length : hatColors.length))
     ],
-    neckScarf: Math.random() < 0.30 ? neckScarfColors[Math.floor(Math.random() * neckScarfColors.length)] : null,
+    neckScarf: Math.random() < 0.25 ? neckScarfColors[Math.floor(Math.random() * neckScarfColors.length)] : null,
+    chestStyle,
+    shirtColor: shirtColors[Math.floor(Math.random() * shirtColors.length)],
+    buttonColor: buttonColors[Math.floor(Math.random() * buttonColors.length)],
+    knitAccent: knitAccents[Math.floor(Math.random() * knitAccents.length)],
     female,
     hasGlasses: Math.random() < 0.65,
     glassesStyle: Math.random() < 0.5 ? 'round' : 'rect',
@@ -1420,23 +1431,16 @@ function drawPensioner(pen, x, y) {
   ctx.fillRect(x + 1, yy - 1, 2, 1);
 
   // Coat / dress
+  ctx.fillStyle = c;
   if (pen.female) {
-    ctx.fillStyle = c;
     ctx.fillRect(x - 3, yy - 12, 7, 8);
     ctx.fillRect(x - 4, yy - 6, 9, 2); // skirt flare
-    // brooch
-    ctx.fillStyle = COL.gold;
-    ctx.fillRect(x, yy - 11, 1, 1);
   } else {
-    ctx.fillStyle = c;
     ctx.fillRect(x - 3, yy - 12, 6, 8);
-    // Shirt collar
-    ctx.fillStyle = '#dddddd';
-    ctx.fillRect(x - 1, yy - 10, 2, 4);
-    // Tie
-    ctx.fillStyle = '#883333';
-    ctx.fillRect(x, yy - 9, 1, 3);
   }
+
+  // Chest detail — skip if there's a neck scarf, since they share the neckline
+  if (!pen.neckScarf) drawChest(pen, x, yy);
 
   // Neck scarf (some pensioners) — sits on top of collar/coat
   if (pen.neckScarf) {
@@ -1478,6 +1482,49 @@ function drawPensioner(pen, x, y) {
       ctx.fillRect(x, yy - 14, 1, 1);
     } else {
       ctx.fillRect(x - 2, yy - 14, 4, 1);
+    }
+  }
+}
+
+function drawChest(pen, x, yy) {
+  switch (pen.chestStyle) {
+    case 'cardigan': {
+      // Small triangle of shirt at the V opening + brass/dark buttons down the front
+      ctx.fillStyle = pen.shirtColor;
+      ctx.fillRect(x, yy - 11, 1, 1);
+      ctx.fillStyle = pen.buttonColor;
+      ctx.fillRect(x, yy - 9, 1, 1);
+      ctx.fillRect(x, yy - 7, 1, 1);
+      ctx.fillRect(x, yy - 5, 1, 1);
+      break;
+    }
+    case 'vneck': {
+      // Wider V of shirt color, no buttons
+      ctx.fillStyle = pen.shirtColor;
+      ctx.fillRect(x, yy - 11, 1, 1);
+      ctx.fillRect(x - 1, yy - 10, 3, 1);
+      break;
+    }
+    case 'crew': {
+      // Ribbed crew-neck band in a contrasting knit accent
+      ctx.fillStyle = pen.knitAccent;
+      ctx.fillRect(x - 2, yy - 11, 5, 1);
+      break;
+    }
+    case 'striped': {
+      // Vertical knit stripes — a wool jumper
+      ctx.fillStyle = pen.knitAccent;
+      ctx.fillRect(x - 2, yy - 11, 1, 7);
+      ctx.fillRect(x + 1, yy - 11, 1, 7);
+      break;
+    }
+    case 'plain': {
+      // Solid coat/sweater. Women still get a small gold brooch as a hint.
+      if (pen.female) {
+        ctx.fillStyle = COL.gold;
+        ctx.fillRect(x, yy - 11, 1, 1);
+      }
+      break;
     }
   }
 }
