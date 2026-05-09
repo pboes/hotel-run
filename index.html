@@ -53,7 +53,7 @@
     <kbd>↑ ↓</kbd> stairs / lift &nbsp;·&nbsp;
     <kbd>SPACE</kbd> squeeze past pensioners &nbsp;·&nbsp;
     <kbd>R</kbd> restart<br>
-    Your card is dead. Reach the <span style="color:#f4d03f">AUTOMAT</span> on floor 1 before the timer runs out.
+    Your card is dead. Reach the <span style="color:#f4d03f">RECEPTION</span> on floor 1 before the timer runs out.
   </div>
 <script>
 'use strict';
@@ -99,7 +99,6 @@ const TIME_LIMIT = 20;
 const ANGRY_PENALTY = 3;
 const NUM_PENSIONERS = 18;        // wandering background population
 const LIFT_CLUSTER_PER_FLOOR = 2; // pensioners parked right next to each lift door
-const SPORT_RATIO = 0.4;          // fraction of pensioners in tracksuits + caps
 
 // ---- Phrase pools ----
 const PHRASES_HAPPY = ['Hej!', 'Förlåt!', 'Tack!', 'Trevligt!', 'Oj då!', 'Ursäkta!', 'Hejsan!'];
@@ -235,20 +234,52 @@ function newGame() {
 }
 
 function makePensionerBase(i) {
-  const formalCoats = ['#3a2c20', '#2c2018', '#4a3a30', '#5a4438', '#1f1812', '#3a2820'];
-  const sportCoats  = ['#2a4a8a', '#5a2a2a', '#2a6a4a', '#4a3a8a', '#6a5a2a', '#2a3a4a', '#7a3a3a'];
-  const hairs       = ['#e0e0e0', '#cccccc', '#d8d4cc', '#b8b0a8', '#e8e0d4'];
-  const capColors   = ['#1a1a4a', '#5a2a2a', '#2a4a2a', '#4a3a2a', '#3a3a3a', '#aa2222'];
-  const isSport = Math.random() < SPORT_RATIO;
+  // Scandinavian-leaning muted palette: wools, dusty pinks, mossy greens, slate blues, ochres
+  const coats = [
+    '#3a4a5a', // slate blue
+    '#2a3a4a', // dark navy
+    '#5a6a78', // dusty grey-blue
+    '#4a5a48', // moss green
+    '#3a4838', // forest
+    '#6a7058', // sage olive
+    '#a88858', // ochre
+    '#8a6840', // warm tan
+    '#5a3838', // muted burgundy
+    '#7a4a4a', // dusty rose-red
+    '#a88090', // dusty pink
+    '#3a3a3a', // charcoal
+    '#5a5048', // taupe
+    '#4a3828', // walnut brown
+    '#b8a888', // oat beige
+    '#2a3a3a', // pine teal
+  ];
+  const hairs = ['#e0e0e0', '#cccccc', '#d8d4cc', '#b8b0a8', '#e8e0d4', '#a09890', '#928878'];
+
+  const female = Math.random() < 0.5;
+
+  // Hat styles
+  const hats = female
+    ? [['none', 0.30], ['scarf', 0.30], ['beret', 0.18], ['woolCap', 0.22]]
+    : [['none', 0.30], ['flatCap', 0.25], ['fedora', 0.18], ['woolCap', 0.27]];
+  let r = Math.random(), hat = 'none';
+  for (const [name, p] of hats) { if (r < p) { hat = name; break; } r -= p; }
+
+  const hatColors = ['#2a2a32', '#1a2838', '#3a2818', '#5a3838', '#3a4a3a', '#5a4838', '#7a6a4a'];
+  const scarfColors = ['#a85a5a', '#5a8aa8', '#7a8a5a', '#aa9050', '#9a7585', '#b0a075', '#c89878'];
+  const neckScarfColors = ['#7a8a98', '#a87858', '#9a6868', '#7a7858', '#586878'];
+
   return {
-    style: isSport ? 'sport' : 'formal',
-    coatColor: isSport
-      ? sportCoats[Math.floor(Math.random() * sportCoats.length)]
-      : formalCoats[Math.floor(Math.random() * formalCoats.length)],
-    capColor: capColors[Math.floor(Math.random() * capColors.length)],
+    coatColor: coats[Math.floor(Math.random() * coats.length)],
     hairColor: hairs[Math.floor(Math.random() * hairs.length)],
-    female: Math.random() < 0.5,
-    hasGlasses: Math.random() < 0.7,
+    hat,
+    hatColor: (hat === 'scarf' ? scarfColors : hatColors)[
+      Math.floor(Math.random() * (hat === 'scarf' ? scarfColors.length : hatColors.length))
+    ],
+    neckScarf: Math.random() < 0.30 ? neckScarfColors[Math.floor(Math.random() * neckScarfColors.length)] : null,
+    female,
+    hasGlasses: Math.random() < 0.65,
+    glassesStyle: Math.random() < 0.5 ? 'round' : 'rect',
+    hasCane: Math.random() < 0.25,
     speed: PEN_SPEED_MIN + Math.random() * (PEN_SPEED_MAX - PEN_SPEED_MIN),
     idleTimer: 0.5 + Math.random() * 3,
     speakTimer: 4 + Math.random() * 8,
@@ -353,7 +384,7 @@ function update(dt) {
   updateBubbles(dt);
   updateLift(dt);
 
-  // Win check — reach automat on floor 1
+  // Win check — reach reception on floor 1
   const p = game.player;
   if (p.mode === 'corridor' && p.floor === 0 && p.x > W - 30) {
     game.state = 'won';
@@ -407,9 +438,15 @@ function updatePlayer(dt) {
     let nx = p.x + vx * PLAYER_SPEED * dt;
     nx = Math.max(8, Math.min(W - 8, nx));
 
-    // Lift shaft is solid in corridor (must use up/down to enter)
-    if (vx > 0 && p.x < LIFT_X1 && nx > LIFT_X1 - 2) nx = LIFT_X1 - 2;
-    if (vx < 0 && p.x > LIFT_X2 && nx < LIFT_X2 + 2) nx = LIFT_X2 + 2;
+    // Lift shaft is solid in corridor (must use up/down to enter).
+    // Exception: on the bottom floor, you can pass through the shaft when
+    // the cab is parked elsewhere — the empty shaft is open at corridor level.
+    const cabHere = Math.abs(game.lift.y - FLOOR_Y[p.floor]) < 25;
+    const shaftBlocks = (p.floor === 0) ? cabHere : true;
+    if (shaftBlocks) {
+      if (vx > 0 && p.x < LIFT_X1 && nx > LIFT_X1 - 2) nx = LIFT_X1 - 2;
+      if (vx < 0 && p.x > LIFT_X2 && nx < LIFT_X2 + 2) nx = LIFT_X2 + 2;
+    }
 
     // Pensioner collision (corridor only) — find nearest blocker in path
     let blocker = null;
@@ -714,7 +751,7 @@ function render() {
   drawBackground();
   drawFloors();
   drawStairs();
-  drawAutomat();
+  drawReception();
 
   // ---- Entity rendering ----
   // Pass 1: stair entities (drawn before lift facade so they get occluded)
@@ -954,6 +991,8 @@ function skipDoorAt(x, f) {
     if (Math.abs(x - (LIFT_X1 - STAIR_GAP - STAIR_RUN)) < 12) return true;
     if (Math.abs(x - (LIFT_X2 + STAIR_GAP + STAIR_RUN)) < 12) return true;
   }
+  // Reception nook covers the right end of floor 1
+  if (f === 0 && x > 432) return true;
   return false;
 }
 
@@ -1235,32 +1274,124 @@ function drawLift() {
   }
 }
 
-function drawAutomat() {
+function drawReception() {
   const fy = FLOOR_Y[0];
-  const x = W - 22;
-  const y = fy - 32;
-  // Body
-  ctx.fillStyle = '#3a4a3a';
-  ctx.fillRect(x, y, 18, 32);
-  ctx.fillStyle = '#5a6a5a';
-  ctx.fillRect(x + 1, y + 1, 16, 30);
-  // Screen
+  const cy = ceilOf(0);
+
+  // Reception nook backing
+  const rx = W - 52, rw = 50;
+  const ry = cy + 4, rh = (fy - 14) - (cy + 4);
+  ctx.fillStyle = '#2a1408';
+  ctx.fillRect(rx, ry, rw, rh);
+  ctx.fillStyle = '#3a1c10';
+  ctx.fillRect(rx, ry, rw, 1);
+
+  // RECEPTION sign
+  ctx.fillStyle = COL.wallDark;
+  ctx.fillRect(rx, ry, rw, 8);
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(rx, ry + 7, rw, 1);
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(rx, ry, rw, 1);
+  drawTinyText(rx + 10, ry + 6, 'RECEPTION', COL.goldBright);
+
+  // Pigeon-hole key board
+  const kbx = rx + 2, kby = ry + 11;
+  const kbw = rw - 4, kbh = rh - 14;
+  ctx.fillStyle = '#1a0a04';
+  ctx.fillRect(kbx, kby, kbw, kbh);
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(kbx, kby, kbw, 1);
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 7; c++) {
+      const ix = kbx + 1 + c * 7, iy = kby + 1 + r * 6;
+      ctx.fillStyle = '#3a2418';
+      ctx.fillRect(ix, iy, 5, 4);
+      // Hanging key (most holes)
+      if ((r * 7 + c + Math.floor(game.elapsed)) % 4 !== 0) {
+        ctx.fillStyle = COL.gold;
+        ctx.fillRect(ix + 2, iy + 1, 1, 2);
+        ctx.fillStyle = COL.goldBright;
+        ctx.fillRect(ix + 2, iy + 1, 1, 1);
+      }
+    }
+  }
+
+  // Reception desk
+  const dx = W - 42, dy = fy - 12, dw = 40, dh = 12;
+  ctx.fillStyle = '#3a1808';
+  ctx.fillRect(dx, dy, dw, dh);
+  ctx.fillStyle = '#5a2a14';
+  ctx.fillRect(dx, dy, dw, 1);
+  // Brass desk trim
+  ctx.fillStyle = COL.gold;
+  ctx.fillRect(dx, dy + 2, dw, 1);
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(dx, dy + 2, 1, 1);
+  // Carved front panels
+  ctx.fillStyle = '#2a1004';
+  ctx.fillRect(dx + 3, dy + 5, 8, 6);
+  ctx.fillRect(dx + 16, dy + 5, 8, 6);
+  ctx.fillRect(dx + 29, dy + 5, 8, 6);
+  ctx.fillStyle = '#5a2a14';
+  ctx.fillRect(dx + 3, dy + 5, 8, 1);
+  ctx.fillRect(dx + 16, dy + 5, 8, 1);
+  ctx.fillRect(dx + 29, dy + 5, 8, 1);
+
+  // Bell on desk (pulses to draw the eye)
   const pulse = 0.5 + 0.5 * Math.sin(game.automatPulse * 4);
-  ctx.fillStyle = `rgba(244, 208, 63, ${0.4 + 0.6 * pulse})`;
-  ctx.fillRect(x + 3, y + 3, 12, 8);
-  // Slot
-  ctx.fillStyle = '#1a1a1a';
-  ctx.fillRect(x + 4, y + 14, 10, 1);
-  // Buttons
-  ctx.fillStyle = '#1a1a1a';
-  ctx.fillRect(x + 4, y + 18, 2, 2);
-  ctx.fillRect(x + 8, y + 18, 2, 2);
-  ctx.fillRect(x + 12, y + 18, 2, 2);
-  ctx.fillRect(x + 4, y + 22, 2, 2);
-  ctx.fillRect(x + 8, y + 22, 2, 2);
-  ctx.fillRect(x + 12, y + 22, 2, 2);
-  // Card slot label
-  drawTinyText(x - 1, y - 4, 'AUTOMAT', COL.highlight);
+  const bxc = dx + 5;
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(bxc - 1, dy, 5, 1);
+  ctx.fillStyle = COL.goldBright;
+  ctx.fillRect(bxc, dy - 2, 3, 2);
+  ctx.fillRect(bxc + 1, dy - 3, 1, 1);
+  ctx.fillStyle = `rgba(244, 216, 120, ${0.25 + 0.5 * pulse})`;
+  ctx.fillRect(bxc - 1, dy - 4, 5, 1);
+
+  // Open ledger book
+  ctx.fillStyle = '#e8d8b0';
+  ctx.fillRect(dx + 14, dy - 1, 9, 1);
+  ctx.fillStyle = '#a89478';
+  ctx.fillRect(dx + 14, dy - 1, 1, 1);
+  ctx.fillRect(dx + 18, dy - 1, 1, 1);
+  ctx.fillRect(dx + 22, dy - 1, 1, 1);
+
+  // Brass desk lamp
+  const lx = dx + 33;
+  ctx.fillStyle = COL.goldDark;
+  ctx.fillRect(lx, dy - 1, 1, 1);          // base
+  ctx.fillRect(lx, dy - 4, 1, 3);          // stem
+  ctx.fillStyle = '#3a2818';
+  ctx.fillRect(lx - 1, dy - 6, 4, 2);      // shade
+  ctx.fillStyle = `rgba(244, 216, 120, ${0.3 + 0.5 * pulse})`;
+  ctx.fillRect(lx, dy - 4, 1, 1);          // bulb glow
+
+  // Clerk behind the desk — head and shoulders
+  const ckx = dx + 27, cky = dy - 1;
+  // Jacket / shoulders just visible above the desk
+  ctx.fillStyle = '#3a2c2c';
+  ctx.fillRect(ckx - 2, cky - 3, 6, 3);
+  // Shirt collar
+  ctx.fillStyle = '#dddddd';
+  ctx.fillRect(ckx - 1, cky - 2, 1, 2);
+  ctx.fillRect(ckx + 2, cky - 2, 1, 2);
+  // Tie
+  ctx.fillStyle = '#5a2828';
+  ctx.fillRect(ckx + 1, cky - 1, 1, 2);
+  // Head
+  ctx.fillStyle = '#f0c896';
+  ctx.fillRect(ckx, cky - 8, 4, 5);
+  // Hair (side-parted)
+  ctx.fillStyle = '#3a2818';
+  ctx.fillRect(ckx, cky - 9, 4, 1);
+  ctx.fillRect(ckx, cky - 8, 1, 2);
+  ctx.fillRect(ckx + 3, cky - 8, 1, 1);
+  // Glasses
+  ctx.fillStyle = '#1a120c';
+  ctx.fillRect(ckx + 1, cky - 6, 1, 1);
+  ctx.fillRect(ckx + 3, cky - 6, 1, 1);
+  ctx.fillRect(ckx + 2, cky - 6, 1, 1);
 }
 
 // ---- Sprites ----
@@ -1271,19 +1402,12 @@ function drawPensioner(pen, x, y) {
   const skin = '#f0c896';
   const dark = '#1a120c';
 
-  if (pen.style === 'sport') {
-    drawSportPensioner(pen, x, yy, c, skin, dark);
-  } else {
-    drawFormalPensioner(pen, x, yy, c, skin, dark);
-  }
-}
-
-function drawFormalPensioner(pen, x, yy, c, skin, dark) {
-  // Cane (some have one) — for formal types only
-  const hasCane = (pen.bobPhase * 7 | 0) % 4 === 0;
-  if (hasCane) {
+  // Cane (small fraction)
+  if (pen.hasCane) {
     ctx.fillStyle = '#7a5a3a';
     ctx.fillRect(x + 3, yy - 12, 1, 12);
+    ctx.fillStyle = '#a8804a';
+    ctx.fillRect(x + 3, yy - 12, 1, 1);
   }
 
   // Legs (dark trousers / stockings)
@@ -1314,6 +1438,13 @@ function drawFormalPensioner(pen, x, yy, c, skin, dark) {
     ctx.fillRect(x, yy - 9, 1, 3);
   }
 
+  // Neck scarf (some pensioners) — sits on top of collar/coat
+  if (pen.neckScarf) {
+    ctx.fillStyle = pen.neckScarf;
+    ctx.fillRect(x - 2, yy - 12, 4, 1);
+    ctx.fillRect(x - 1, yy - 11, 1, 1);
+  }
+
   // Arms
   ctx.fillStyle = c;
   ctx.fillRect(x - 4, yy - 11, 1, 5);
@@ -1322,7 +1453,8 @@ function drawFormalPensioner(pen, x, yy, c, skin, dark) {
   // Head
   ctx.fillStyle = skin;
   ctx.fillRect(x - 2, yy - 17, 4, 5);
-  // Hair
+
+  // Hair (drawn first, hat covers it where opaque)
   ctx.fillStyle = pen.hairColor;
   if (pen.female) {
     ctx.fillRect(x - 3, yy - 18, 6, 3);
@@ -1333,81 +1465,62 @@ function drawFormalPensioner(pen, x, yy, c, skin, dark) {
     ctx.fillRect(x - 3, yy - 16, 1, 2);
     ctx.fillRect(x + 2, yy - 16, 1, 2);
   }
+
+  // Hat
+  drawHat(pen, x, yy);
+
   // Glasses
   if (pen.hasGlasses) {
     ctx.fillStyle = dark;
-    ctx.fillRect(x - 2, yy - 14, 1, 1);
-    ctx.fillRect(x + 1, yy - 14, 1, 1);
-    ctx.fillRect(x, yy - 14, 1, 1);
+    if (pen.glassesStyle === 'round') {
+      ctx.fillRect(x - 2, yy - 14, 1, 1);
+      ctx.fillRect(x + 1, yy - 14, 1, 1);
+      ctx.fillRect(x, yy - 14, 1, 1);
+    } else {
+      ctx.fillRect(x - 2, yy - 14, 4, 1);
+    }
   }
 }
 
-function drawSportPensioner(pen, x, yy, c, skin, dark) {
-  // White sneakers (chunky)
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(x - 3, yy - 1, 3, 1);
-  ctx.fillRect(x + 1, yy - 1, 3, 1);
-  // Sneaker stripe
-  ctx.fillStyle = c;
-  ctx.fillRect(x - 3, yy - 1, 1, 1);
-  ctx.fillRect(x + 3, yy - 1, 1, 1);
-
-  // Tracksuit pants (same color as top, with a white stripe)
-  ctx.fillStyle = c;
-  ctx.fillRect(x - 2, yy - 4, 1, 3);
-  ctx.fillRect(x + 1, yy - 4, 1, 3);
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(x - 2, yy - 4, 1, 1);
-  ctx.fillRect(x + 1, yy - 4, 1, 1);
-
-  // Tracksuit jacket
-  ctx.fillStyle = c;
-  ctx.fillRect(x - 3, yy - 12, 6, 8);
-  // Zipper line
-  ctx.fillStyle = '#1a1a1a';
-  ctx.fillRect(x, yy - 11, 1, 6);
-  // Vertical white side stripes (the hallmark Adidas pensioner)
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(x - 3, yy - 11, 1, 7);
-  ctx.fillRect(x + 2, yy - 11, 1, 7);
-
-  // Arms
-  ctx.fillStyle = c;
-  ctx.fillRect(x - 4, yy - 11, 1, 5);
-  ctx.fillRect(x + 3, yy - 11, 1, 5);
-  // Arm stripe
-  ctx.fillStyle = '#e8e8e8';
-  ctx.fillRect(x - 4, yy - 11, 1, 1);
-  ctx.fillRect(x + 3, yy - 11, 1, 1);
-
-  // Head
-  ctx.fillStyle = skin;
-  ctx.fillRect(x - 2, yy - 17, 4, 5);
-
-  // Cap
-  const brimDir = pen.female ? 0 : 1; // some forward, some no brim
-  ctx.fillStyle = pen.capColor;
-  ctx.fillRect(x - 3, yy - 19, 6, 2);  // top of cap
-  ctx.fillRect(x - 2, yy - 17, 4, 1);  // band
-  // Brim sticking out
-  ctx.fillRect(x + 2, yy - 17, 2, 1);
-
-  // White hair tuft poking out the back/sides (some)
-  if (Math.random() < 0.0001 || pen.hairColor) {
-    ctx.fillStyle = pen.hairColor;
-    ctx.fillRect(x - 3, yy - 16, 1, 1);
-    ctx.fillRect(x + 2, yy - 16, 1, 1);
-  }
-
-  // Cap logo dot
-  ctx.fillStyle = COL.goldBright;
-  ctx.fillRect(x, yy - 18, 1, 1);
-
-  // Glasses (sportier, smaller)
-  if (pen.hasGlasses) {
-    ctx.fillStyle = dark;
-    ctx.fillRect(x - 2, yy - 14, 1, 1);
-    ctx.fillRect(x + 1, yy - 14, 1, 1);
+function drawHat(pen, x, yy) {
+  const c = pen.hatColor;
+  if (!c) return;
+  switch (pen.hat) {
+    case 'woolCap':
+      ctx.fillStyle = c;
+      ctx.fillRect(x - 3, yy - 19, 6, 3);
+      ctx.fillRect(x - 3, yy - 16, 6, 1);   // brim band
+      ctx.fillStyle = '#e8e0d0';            // pom-pom
+      ctx.fillRect(x, yy - 20, 1, 1);
+      break;
+    case 'fedora':
+      ctx.fillStyle = c;
+      ctx.fillRect(x - 4, yy - 16, 8, 1);   // brim
+      ctx.fillRect(x - 2, yy - 19, 4, 3);   // crown
+      // contrasting band
+      ctx.fillStyle = '#e8d8b0';
+      ctx.fillRect(x - 2, yy - 17, 4, 1);
+      break;
+    case 'flatCap':
+      ctx.fillStyle = c;
+      ctx.fillRect(x - 3, yy - 18, 6, 2);
+      ctx.fillRect(x + 2, yy - 17, 2, 1);   // forward brim
+      break;
+    case 'beret':
+      ctx.fillStyle = c;
+      ctx.fillRect(x - 3, yy - 18, 7, 2);
+      ctx.fillRect(x + 3, yy - 19, 1, 1);   // little stem
+      break;
+    case 'scarf':
+      ctx.fillStyle = c;
+      ctx.fillRect(x - 3, yy - 18, 6, 3);
+      ctx.fillRect(x - 3, yy - 15, 1, 3);
+      ctx.fillRect(x + 2, yy - 15, 1, 3);
+      ctx.fillRect(x - 1, yy - 12, 2, 1);   // tied under chin
+      // tiny floral fleck
+      ctx.fillStyle = '#e8d8b0';
+      ctx.fillRect(x, yy - 17, 1, 1);
+      break;
   }
 }
 
@@ -1593,7 +1706,7 @@ function drawEndScreen(won) {
   ctx.fillRect(0, 0, W, H);
   ctx.font = 'bold 24px monospace';
   ctx.fillStyle = won ? COL.ok : COL.warn;
-  const title = won ? 'CARD CHARGED' : 'TIME UP';
+  const title = won ? 'BILL PAID' : 'TIME UP';
   ctx.fillText(title, W / 2 - ctx.measureText(title).width / 2, H / 2 - 18);
 
   ctx.font = '10px monospace';
